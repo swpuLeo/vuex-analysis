@@ -2,6 +2,7 @@ import { forEachValue } from '../util'
 
 // Base data struct for store's module, package with some attribute and method
 export default class Module {
+  // module 会存下传入的 options 和 state
   constructor (rawModule, runtime) {
     this.runtime = runtime
     // Store some children item

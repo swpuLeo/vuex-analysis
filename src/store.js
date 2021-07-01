@@ -22,7 +22,7 @@ export class Store {
 
     const {
       plugins = [],
-      strict = false
+      strict = false // 默认非严格模式，严格模式在开发环境直接更改 state 会发出警告
     } = options
 
     // store internal state
@@ -59,6 +59,7 @@ export class Store {
 
     // initialize the store vm, which is responsible for the reactivity
     // (also registers _wrappedGetters as computed properties)
+    // 这里让 state 变成响应式的，并且派生出 getter
     resetStoreVM(this, state)
 
     // apply plugins
@@ -80,14 +81,19 @@ export class Store {
     }
   }
 
+  // 使用 commit 提交一个 mutation
   commit (_type, _payload, _options) {
     // check object-style commit
+    // 统一两种风格的 commit
+    // 1、commit('increment', 10)
+    // 2、commit({ type: 'increment', amount: 10 })
     const {
       type,
       payload,
       options
     } = unifyObjectStyle(_type, _payload, _options)
 
+    // 取出 type 的 Array<wrappedMutationHandler>
     const mutation = { type, payload }
     const entry = this._mutations[type]
     if (!entry) {
@@ -96,8 +102,15 @@ export class Store {
       }
       return
     }
+    // 看到 _withCommit 就是准备更改 state
     this._withCommit(() => {
       entry.forEach(function commitIterator (handler) {
+        // 调用 wrappedMutationHandler，传入 payload
+        // 执行开发者的 mutation 操作
+        // 有一点不理解的是，开发者操作的 state 是 local.state，那为什么还会更改 store.state？
+        // 参考这个例子：https://jsbin.com/rekapataxa/1/edit?js,console
+        // 将 local.state 代理到 store.state，实际的操作都是发生在 store.state
+        // 但是不可以 local.state = {}
         handler(payload)
       })
     })
@@ -117,6 +130,7 @@ export class Store {
     }
   }
 
+  // 使用 dispatch 提交一个 action
   dispatch (_type, _payload) {
     // check object-style dispatch
     const {
@@ -244,6 +258,8 @@ export class Store {
     resetStore(this, true)
   }
 
+  // fn 参数往往可能修改 state，这是 vuex 预期的行为（通过 mutation）
+  // 这时就把 _committing 打开，避免发出警告，参考 enableStrictMode
   _withCommit (fn) {
     const committing = this._committing
     this._committing = true
@@ -278,6 +294,9 @@ function resetStore (store, hot) {
   resetStoreVM(store, state, hot)
 }
 
+// 这个函数会在 store 实例上挂载一个 _vm vue 实例
+// 用来实现 state 和 getter 的响应
+// 每次调用都应该销毁之前的 _vm
 function resetStoreVM (store, state, hot) {
   const oldVm = store._vm
 
@@ -285,13 +304,20 @@ function resetStoreVM (store, state, hot) {
   store.getters = {}
   // reset local getters cache
   store._makeLocalGettersCache = Object.create(null)
+  // 拿到注册的 getters
+  // 然后将 getters 转换为 computed，注入到 _vm
   const wrappedGetters = store._wrappedGetters
   const computed = {}
+  // forEachValue(obj, fn)：迭代 obj 的每一个 key，然后执行 fn 操作
+  // fn 的两个参数分别是 obj 的 val key
   forEachValue(wrappedGetters, (fn, key) => {
     // use computed to leverage its lazy-caching mechanism
     // direct inline function use will lead to closure preserving oldVm.
     // using partial to return function with only arguments preserved in closure environment.
+    // TODO 不太能 get 到这个函数的作用
+    // 就是将 store 传入 fn，fn 是注册的 getter
     computed[key] = partial(fn, store)
+    // 然后设置代理，访问 store.getters 实际上就是访问的是 _vm 的计算属性
     Object.defineProperty(store.getters, key, {
       get: () => store._vm[key],
       enumerable: true // for local getters
@@ -301,6 +327,9 @@ function resetStoreVM (store, state, hot) {
   // use a Vue instance to store the state tree
   // suppress warnings just in case the user has added
   // some funky global mixins
+  // 借助 Vue 的响应式系统来实现 state 和 getter 的响应
+  // 并把它挂载到 _vm
+  // silent 会禁止 vue 所有的日志和警告
   const silent = Vue.config.silent
   Vue.config.silent = true
   store._vm = new Vue({
@@ -312,10 +341,12 @@ function resetStoreVM (store, state, hot) {
   Vue.config.silent = silent
 
   // enable strict mode for new vm
+  // 是否开启严格模式
   if (store.strict) {
     enableStrictMode(store)
   }
 
+  // 如果是更新，应该把旧的实例销毁掉
   if (oldVm) {
     if (hot) {
       // dispatch changes in all subscribed watchers
@@ -328,11 +359,20 @@ function resetStoreVM (store, state, hot) {
   }
 }
 
+// 这个函数的主要作用
+// path 的理解：['nested', 'moduleA'] 到达 moduleA 的层级
+// 1、获取当前 path 的命名空间（可能为 ''，否则就是 'nested/moduleA'），缓存一下 namespace -> module
+// 2、合并 state
+// 3、生成当前 module 的 local 对象
+// 4、注册当前 module 的 mutation action getter
+// 5、递归注册子 module
 function installModule (store, rootState, path, module, hot) {
   const isRoot = !path.length
+  // 得到一个 namespace 字符串，比如 'nested/moduleA'，未开启 namespaced 的 module 得到一个 ''
   const namespace = store._modules.getNamespace(path)
 
   // register in namespace map
+  // 缓存开启了 namespaced 的 module
   if (module.namespaced) {
     if (store._modulesNamespaceMap[namespace] && __DEV__) {
       console.error(`[vuex] duplicate namespace ${namespace} for the namespaced module ${path.join('/')}`)
@@ -341,6 +381,7 @@ function installModule (store, rootState, path, module, hot) {
   }
 
   // set state
+  // 这里把所有的 module state 都响应式注册到 rootState 中（合并 state）
   if (!isRoot && !hot) {
     const parentState = getNestedState(rootState, path.slice(0, -1))
     const moduleName = path[path.length - 1]
@@ -352,13 +393,24 @@ function installModule (store, rootState, path, module, hot) {
           )
         }
       }
+      // 这也是为什么可以直接使用 state.moduleName 拿到 moduleState 的原因
       Vue.set(parentState, moduleName, module.state)
     })
   }
 
+  // local（包括 getter state dispatch commit），当前模块的状态
+  // 为什么不直接用 module.state？而要生成一个 local？
+  // 原因是 module.state 仅仅是保存开发者的 state 源，并不具备响应性
+  // 在上一步，已经把 module state 合并到 rootState
+  // 这样再生成一个 local ，开发者在使用时就具备了响应式的 state，同时还可以忽略 module 嵌套的层级
+  // 具体见 makeLocalContext 的实现
   const local = module.context = makeLocalContext(store, namespace, path)
 
+  // 注册 module 的 mutation action getter
+  // 这里的参数 muation 就是开发者定义的 mutation 函数，key 是这个 mutation 的类型
+  // action getter 同理
   module.forEachMutation((mutation, key) => {
+    // 注意哦，如果没有 namespace，那么不同的 module 会把相同的 mutation type 放在一起
     const namespacedType = namespace + key
     registerMutation(store, namespacedType, mutation, local)
   })
@@ -383,6 +435,8 @@ function installModule (store, rootState, path, module, hot) {
  * make localized dispatch, commit, getters and state
  * if there is no namespace, just use root ones
  */
+// 如何理解 local？
+// local 是属于这个模块的 getters state
 function makeLocalContext (store, namespace, path) {
   const noNamespace = namespace === ''
 
@@ -422,6 +476,13 @@ function makeLocalContext (store, namespace, path) {
 
   // getters and state object must be gotten lazily
   // because they will be changed by vm update
+  // local 的 getters 和 state 采用惰性求值，是因为 localContext 只会在初始化的时候执行一次
+  // 而如果 vm 发生变化，root state getters 会发生变化
+  // vm 什么时候会发生改变？调用 resetStoreVM
+  // 什么时候触发 resetStoreVM？
+  // 1、初始化 2、动态注册 module（registerModule）3、resetStore（unregisterModule、hotUpdate）
+  // 2和3都是开放给开发者的 API
+  // 只有在用到时才会计算取值
   Object.defineProperties(local, {
     getters: {
       get: noNamespace
@@ -461,6 +522,8 @@ function makeLocalGetters (store, namespace) {
   return store._makeLocalGettersCache[namespace]
 }
 
+// handler 是开发者定义的 mutation
+// 就是在 store._mutations 存一个 { [type: string]: Array<wrappedMutationHandler> } 类型的数据
 function registerMutation (store, type, handler, local) {
   const entry = store._mutations[type] || (store._mutations[type] = [])
   entry.push(function wrappedMutationHandler (payload) {
@@ -468,9 +531,15 @@ function registerMutation (store, type, handler, local) {
   })
 }
 
+
 function registerAction (store, type, handler, local) {
   const entry = store._actions[type] || (store._actions[type] = [])
   entry.push(function wrappedActionHandler (payload) {
+    // 对于 action 来说，开发者能够接触的API就比较多
+    // 除了当前模块的 dispatch commit getters state
+    // 还能访问根 module 的 getter state
+    // action 通过 commit muation 才能更改 state
+    // action 可以 dispatch 其他的 action
     let res = handler.call(store, {
       dispatch: local.dispatch,
       commit: local.commit,
@@ -501,6 +570,7 @@ function registerGetter (store, type, rawGetter, local) {
     return
   }
   store._wrappedGetters[type] = function wrappedGetter (store) {
+    // 开发者可以拿到当前 module 和根 module 的 state getter
     return rawGetter(
       local.state, // local state
       local.getters, // local getters
@@ -510,6 +580,11 @@ function registerGetter (store, type, rawGetter, local) {
   }
 }
 
+// 监听 state 的改动，如果直接修改 state，开发环境下会发出警告
+// 这里很奇妙的是，直接修改 state，store._commiting 是 false，就会警告
+// 而如果通过 mutation 来改，会把 store._commiting 变为 true，就不会发出警告，参考 _withCommit
+// 也就是说 vuex 在实现「不能直接修改 state」时，采用的是一种约定
+// 如果不按约定来，不会禁止用户的行为，而是让用户的行为执行（至于执行的结果，vuex 不保证）
 function enableStrictMode (store) {
   store._vm.$watch(function () { return this._data.$$state }, () => {
     if (__DEV__) {
